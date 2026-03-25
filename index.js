@@ -3,81 +3,53 @@ const http = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
 const path = require("path");
-const fs = require("fs");
 
 const app = express();
 app.use(cors());
-
 const server = http.createServer(app);
-
-// Настройки сокетов
 const io = new Server(server, {
   cors: { origin: "*" },
-  maxHttpBufferSize: 1e8, // 100 МБ лимит
-  pingTimeout: 60000,
+  maxHttpBufferSize: 1e8, // 100MB для картинок и голоса
 });
 
-// 1. ПУТЬ К ПАПКЕ С ДИЗАЙНОМ
-const distPath = path.join(__dirname, "dist");
+app.use(express.static(path.join(__dirname, "dist")));
 
-// 2. ПОДКЛЮЧЕНИЕ СТАТИКИ (файлы стилей, картинок и т.д.)
-app.use(express.static(distPath));
-
-// 3. ЛОГИКА МЕССЕНДЖЕРА
 let users = {};
 
 io.on("connection", (socket) => {
-  console.log("Новое подключение:", socket.id);
-
+  // Вход
   socket.on("user_join", (userData) => {
-    if (!userData) return;
     users[socket.id] = { ...userData, socketId: socket.id };
-    console.log(`Пользователь ${userData.username} в сети`);
     io.emit("update_users", Object.values(users));
   });
 
-  socket.on("send_message", (msgData) => {
-    io.emit("receive_message", msgData);
+  // Отправка (текст, фото, голос)
+  socket.on("send_message", (msg) => {
+    io.emit("receive_message", msg);
   });
 
-  socket.on("ask_for_music", (targetUsername) => {
-    const target = Object.values(users).find(
-      (u) => u.username === targetUsername,
-    );
-    if (target) {
-      io.to(target.socketId).emit("request_music", socket.id);
-    }
+  // Удаление
+  socket.on("delete_message", (msgId) => {
+    io.emit("message_deleted", msgId);
   });
 
-  socket.on("send_music_to_user", (data) => {
-    io.to(data.to).emit("receive_music", data);
+  // Редактирование
+  socket.on("edit_message", (data) => {
+    io.emit("message_edited", data);
+  });
+
+  // Статус "Прочитано"
+  socket.on("mark_read", (data) => {
+    io.emit("status_updated", data);
   });
 
   socket.on("disconnect", () => {
-    if (users[socket.id]) {
-      const name = users[socket.id].username;
-      delete users[socket.id];
-      console.log(`${name} вышел`);
-      io.emit("update_users", Object.values(users));
-    }
+    delete users[socket.id];
+    io.emit("update_users", Object.values(users));
   });
 });
 
-// 4. ГАРАНТИРОВАННЫЙ ФИКС ДЛЯ EXPRESS 5
-// Мы не используем app.get('*'), чтобы избежать ошибок библиотеки path-to-regexp.
-// Этот блок сработает как "запасной вариант" для любого запроса к серверу.
-app.use((req, res) => {
-  const indexPath = path.join(distPath, "index.html");
-  if (fs.existsSync(indexPath)) {
-    res.sendFile(indexPath);
-  } else {
-    res
-      .status(404)
-      .send("Ошибка: Папка dist или файл index.html не найдены на сервере.");
-  }
-});
+app.use((req, res) => res.sendFile(path.join(__dirname, "dist", "index.html")));
 
 const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => {
-  console.log(`>>> Skadik запущен на порту ${PORT}`);
-});
+server.listen(PORT, () => console.log(`Server running on ${PORT}`));
