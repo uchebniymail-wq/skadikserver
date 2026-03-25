@@ -8,35 +8,68 @@ const app = express();
 app.use(cors());
 
 const server = http.createServer(app);
+
+// Настройки сокетов с поддержкой больших файлов (музыки)
 const io = new Server(server, {
   cors: { origin: "*" },
-  maxHttpBufferSize: 1e8,
+  maxHttpBufferSize: 1e8, // 100 МБ лимит
+  pingTimeout: 60000,
 });
 
-// 1. Сначала подключаем статические файлы из папки dist
-// Убедись, что папка 'dist' лежит прямо рядом с этим index.js
+// 1. ПОДКЛЮЧАЕМ ДИЗАЙН (папка dist)
 const distPath = path.join(__dirname, "dist");
 app.use(express.static(distPath));
 
-// 2. Код сокетов (io.on...) оставляем без изменений
-io.on("connection", (socket) => {
-  // Твой текущий код сокетов здесь
-  console.log("Подключился:", socket.id);
+// 2. ЛОГИКА МЕССЕНДЖЕРА (ВОССТАНОВЛЕНА)
+let users = {};
 
-  socket.on("user_join", (user) => {
-    // ... твоя логика
-    io.emit("update_users", []); // Пример
+io.on("connection", (socket) => {
+  console.log("Новое подключение:", socket.id);
+
+  // Когда пользователь входит
+  socket.on("user_join", (userData) => {
+    if (!userData) return;
+    users[socket.id] = { ...userData, socketId: socket.id };
+    console.log(`Пользователь ${userData.username} в сети`);
+    io.emit("update_users", Object.values(users));
   });
-  // и так далее...
+
+  // Отправка сообщений
+  socket.on("send_message", (msgData) => {
+    io.emit("receive_message", msgData);
+  });
+
+  // Логика передачи музыки между профилями
+  socket.on("ask_for_music", (targetUsername) => {
+    const target = Object.values(users).find(
+      (u) => u.username === targetUsername,
+    );
+    if (target) {
+      io.to(target.socketId).emit("request_music", socket.id);
+    }
+  });
+
+  socket.on("send_music_to_user", (data) => {
+    io.to(data.to).emit("receive_music", data);
+  });
+
+  // Отключение
+  socket.on("disconnect", () => {
+    if (users[socket.id]) {
+      console.log(`${users[socket.id].username} вышел`);
+      delete users[socket.id];
+      io.emit("update_users", Object.values(users));
+    }
+  });
 });
 
-// 3. САМОЕ ВАЖНОЕ: этот блок должен быть в самом конце!
-// Он говорит: если запрос не на файл (не на картинку или скрипт), отдай сайт
-app.get("*", (req, res) => {
+// 3. ИСПРАВЛЕННЫЙ РОУТИНГ (Fix для Express 5 / Render)
+// Используем (.*) вместо * чтобы не было ошибки "Missing parameter name"
+app.get("(.*)", (req, res) => {
   res.sendFile(path.join(distPath, "index.html"));
 });
 
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
-  console.log(`Skadik запущен на порту ${PORT}`);
+  console.log(`>>> Skadik запущен на порту ${PORT}`);
 });
