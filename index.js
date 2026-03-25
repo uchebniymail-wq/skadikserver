@@ -51,6 +51,9 @@ io.on("connection", (socket) => {
   });
 });
 
+app.get("/", (req, res) => {
+  res.send("Сервер мессенджера Skadi запущен и готов к работе!");
+});
 const PORT = 3001;
 server.listen(PORT, () => {
   console.log(`>>> СЕРВЕР SKADI ЗАПУЩЕН НА ПОРТУ ${PORT}`);
