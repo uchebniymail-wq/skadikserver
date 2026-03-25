@@ -3,7 +3,7 @@ const http = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
 const path = require("path");
-const fs = require("fs"); // Для проверки папки
+const fs = require("fs");
 
 const app = express();
 app.use(cors());
@@ -13,21 +13,22 @@ const server = http.createServer(app);
 // Настройки сокетов
 const io = new Server(server, {
   cors: { origin: "*" },
-  maxHttpBufferSize: 1e8,
+  maxHttpBufferSize: 1e8, // 100 МБ лимит
   pingTimeout: 60000,
 });
 
-// 1. ПРОВЕРКА И ПОДКЛЮЧЕНИЕ ПАПКИ DIST
+// 1. ПУТЬ К ПАПКЕ С ДИЗАЙНОМ
 const distPath = path.join(__dirname, "dist");
 
+// 2. ПОДКЛЮЧЕНИЕ СТАТИКИ
 if (fs.existsSync(distPath)) {
   console.log(">>> Папка dist найдена, подключаю интерфейс...");
   app.use(express.static(distPath));
 } else {
-  console.error("!!! ОШИБКА: Папка dist не найдена в корне сервера!");
+  console.error("!!! ОШИБКА: Папка dist не найдена!");
 }
 
-// 2. ЛОГИКА МЕССЕНДЖЕРА
+// 3. ЛОГИКА МЕССЕНДЖЕРА
 let users = {};
 
 io.on("connection", (socket) => {
@@ -59,29 +60,26 @@ io.on("connection", (socket) => {
 
   socket.on("disconnect", () => {
     if (users[socket.id]) {
-      console.log(`${users[socket.id].username} вышел`);
+      const name = users[socket.id].username;
       delete users[socket.id];
+      console.log(`${name} вышел`);
       io.emit("update_users", Object.values(users));
     }
   });
 });
 
-// 3. РОУТИНГ ДЛЯ БРАУЗЕРА
-// Если это не запрос к файлу в dist, отдаем index.html
-app.get("*", (req, res) => {
+// 4. ИСПРАВЛЕННЫЙ РОУТИНГ ДЛЯ EXPRESS 5
+// Мы добавили ':any' перед звездочкой. Теперь Render не будет ругаться.
+app.get("/:any*", (req, res) => {
   const indexPath = path.join(distPath, "index.html");
   if (fs.existsSync(indexPath)) {
     res.sendFile(indexPath);
   } else {
-    res
-      .status(404)
-      .send(
-        "Файл index.html не найден. Убедитесь, что вы сделали npm run build и перенесли папку dist.",
-      );
+    res.status(404).send("Ошибка: dist/index.html не найден на сервере.");
   }
 });
 
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
-  console.log(`>>> Skadik успешно запущен на порту ${PORT}`);
+  console.log(`>>> Skadik запущен на порту ${PORT}`);
 });
