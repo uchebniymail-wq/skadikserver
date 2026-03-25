@@ -10,13 +10,13 @@ app.use(cors());
 
 const server = http.createServer(app);
 
-// Блок создания io с твоими настройками (CORS + Buffer 100MB)
+// Обновленный блок создания io с разрешением любых подключений и твоими лимитами
 const io = new Server(server, {
   cors: {
-    origin: "*",
+    origin: "*", // Разрешаем подключения с любого адреса
     methods: ["GET", "POST"],
   },
-  // Увеличиваем максимальный размер сообщения до 100 МБ
+  // Увеличиваем максимальный размер сообщения до 100 МБ для передачи файлов/изображений
   maxHttpBufferSize: 1e8,
   transports: ["websocket", "polling"],
 });
@@ -54,6 +54,7 @@ io.on("connection", (socket) => {
 app.get("/", (req, res) => {
   res.send("Сервер мессенджера Skadi запущен и готов к работе!");
 });
+
 const PORT = 3001;
 server.listen(PORT, () => {
   console.log(`>>> СЕРВЕР SKADI ЗАПУЩЕН НА ПОРТУ ${PORT}`);
