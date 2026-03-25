@@ -9,24 +9,23 @@ app.use(cors());
 
 const server = http.createServer(app);
 
-// Настройки сокетов с поддержкой больших файлов (музыки)
+// Настройки сокетов
 const io = new Server(server, {
   cors: { origin: "*" },
-  maxHttpBufferSize: 1e8, // 100 МБ лимит
+  maxHttpBufferSize: 1e8,
   pingTimeout: 60000,
 });
 
-// 1. ПОДКЛЮЧАЕМ ДИЗАЙН (папка dist)
+// 1. ПОДКЛЮЧАЕМ СТАТИКУ (дизайн)
 const distPath = path.join(__dirname, "dist");
 app.use(express.static(distPath));
 
-// 2. ЛОГИКА МЕССЕНДЖЕРА (ВОССТАНОВЛЕНА)
+// 2. ЛОГИКА МЕССЕНДЖЕРА
 let users = {};
 
 io.on("connection", (socket) => {
   console.log("Новое подключение:", socket.id);
 
-  // Когда пользователь входит
   socket.on("user_join", (userData) => {
     if (!userData) return;
     users[socket.id] = { ...userData, socketId: socket.id };
@@ -34,12 +33,10 @@ io.on("connection", (socket) => {
     io.emit("update_users", Object.values(users));
   });
 
-  // Отправка сообщений
   socket.on("send_message", (msgData) => {
     io.emit("receive_message", msgData);
   });
 
-  // Логика передачи музыки между профилями
   socket.on("ask_for_music", (targetUsername) => {
     const target = Object.values(users).find(
       (u) => u.username === targetUsername,
@@ -53,7 +50,6 @@ io.on("connection", (socket) => {
     io.to(data.to).emit("receive_music", data);
   });
 
-  // Отключение
   socket.on("disconnect", () => {
     if (users[socket.id]) {
       console.log(`${users[socket.id].username} вышел`);
@@ -63,9 +59,9 @@ io.on("connection", (socket) => {
   });
 });
 
-// 3. ИСПРАВЛЕННЫЙ РОУТИНГ (Fix для Express 5 / Render)
-// Используем (.*) вместо * чтобы не было ошибки "Missing parameter name"
-app.get("(.*)", (req, res) => {
+// 3. ФИНАЛЬНЫЙ ФИКС РОУТИНГА (Для Express 5)
+// Вместо app.get('*') используем функцию-заглушку, которая сработает на любой запрос
+app.use((req, res) => {
   res.sendFile(path.join(distPath, "index.html"));
 });
 
