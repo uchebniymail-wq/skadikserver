@@ -20,13 +20,8 @@ const io = new Server(server, {
 // 1. ПУТЬ К ПАПКЕ С ДИЗАЙНОМ
 const distPath = path.join(__dirname, "dist");
 
-// 2. ПОДКЛЮЧЕНИЕ СТАТИКИ
-if (fs.existsSync(distPath)) {
-  console.log(">>> Папка dist найдена, подключаю интерфейс...");
-  app.use(express.static(distPath));
-} else {
-  console.error("!!! ОШИБКА: Папка dist не найдена!");
-}
+// 2. ПОДКЛЮЧЕНИЕ СТАТИКИ (файлы стилей, картинок и т.д.)
+app.use(express.static(distPath));
 
 // 3. ЛОГИКА МЕССЕНДЖЕРА
 let users = {};
@@ -68,14 +63,17 @@ io.on("connection", (socket) => {
   });
 });
 
-// 4. ИСПРАВЛЕННЫЙ РОУТИНГ ДЛЯ EXPRESS 5
-// Мы добавили ':any' перед звездочкой. Теперь Render не будет ругаться.
-app.get("/:any*", (req, res) => {
+// 4. ГАРАНТИРОВАННЫЙ ФИКС ДЛЯ EXPRESS 5
+// Мы не используем app.get('*'), чтобы избежать ошибок библиотеки path-to-regexp.
+// Этот блок сработает как "запасной вариант" для любого запроса к серверу.
+app.use((req, res) => {
   const indexPath = path.join(distPath, "index.html");
   if (fs.existsSync(indexPath)) {
     res.sendFile(indexPath);
   } else {
-    res.status(404).send("Ошибка: dist/index.html не найден на сервере.");
+    res
+      .status(404)
+      .send("Ошибка: Папка dist или файл index.html не найдены на сервере.");
   }
 });
 
