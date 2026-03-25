@@ -2,61 +2,41 @@ const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
+const path = require("path");
 
 const app = express();
-
-// Полностью разрешаем CORS для всех HTTP запросов
 app.use(cors());
 
 const server = http.createServer(app);
-
 const io = new Server(server, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"],
-  },
-  // Увеличиваем лимит до 100 МБ (1e8 байт)
+  cors: { origin: "*" },
   maxHttpBufferSize: 1e8,
-  // Разрешаем долгие соединения, так как музыка весит много и грузится долго
-  pingTimeout: 60000,
-  transports: ["websocket", "polling"],
 });
 
-let users = {};
+// 1. Сначала подключаем статические файлы из папки dist
+// Убедись, что папка 'dist' лежит прямо рядом с этим index.js
+const distPath = path.join(__dirname, "dist");
+app.use(express.static(distPath));
 
+// 2. Код сокетов (io.on...) оставляем без изменений
 io.on("connection", (socket) => {
-  console.log("Подключился сокет:", socket.id);
+  // Твой текущий код сокетов здесь
+  console.log("Подключился:", socket.id);
 
-  socket.on("user_join", (userData) => {
-    if (!userData) return;
-    // Сохраняем пользователя в объекте по его socket.id
-    users[socket.id] = { ...userData, socketId: socket.id };
-    console.log(`Пользователь ${userData.username} вошел в сеть`);
-
-    // Рассылаем всем обновленный список активных пользователей
-    io.emit("update_users", Object.values(users));
+  socket.on("user_join", (user) => {
+    // ... твоя логика
+    io.emit("update_users", []); // Пример
   });
-
-  socket.on("send_message", (msgData) => {
-    // Рассылаем сообщение всем (клиент сам отфильтрует нужное по ID)
-    io.emit("receive_message", msgData);
-  });
-
-  socket.on("disconnect", () => {
-    if (users[socket.id]) {
-      console.log(`${users[socket.id].username} ушел`);
-      delete users[socket.id];
-      // Обновляем список у всех после выхода пользователя
-      io.emit("update_users", Object.values(users));
-    }
-  });
+  // и так далее...
 });
 
-app.get("/", (req, res) => {
-  res.send("Сервер мессенджера Skadi запущен и готов к работе!");
+// 3. САМОЕ ВАЖНОЕ: этот блок должен быть в самом конце!
+// Он говорит: если запрос не на файл (не на картинку или скрипт), отдай сайт
+app.get("*", (req, res) => {
+  res.sendFile(path.join(distPath, "index.html"));
 });
 
-const PORT = 3001;
+const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
-  console.log(`>>> СЕРВЕР SKADI ЗАПУЩЕН НА ПОРТУ ${PORT}`);
+  console.log(`Skadik запущен на порту ${PORT}`);
 });
