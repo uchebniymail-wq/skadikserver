@@ -3,6 +3,7 @@ const http = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
 const path = require("path");
+const fs = require("fs"); // Для проверки папки
 
 const app = express();
 app.use(cors());
@@ -16,9 +17,15 @@ const io = new Server(server, {
   pingTimeout: 60000,
 });
 
-// 1. ПОДКЛЮЧАЕМ СТАТИКУ (дизайн)
+// 1. ПРОВЕРКА И ПОДКЛЮЧЕНИЕ ПАПКИ DIST
 const distPath = path.join(__dirname, "dist");
-app.use(express.static(distPath));
+
+if (fs.existsSync(distPath)) {
+  console.log(">>> Папка dist найдена, подключаю интерфейс...");
+  app.use(express.static(distPath));
+} else {
+  console.error("!!! ОШИБКА: Папка dist не найдена в корне сервера!");
+}
 
 // 2. ЛОГИКА МЕССЕНДЖЕРА
 let users = {};
@@ -59,13 +66,22 @@ io.on("connection", (socket) => {
   });
 });
 
-// 3. ФИНАЛЬНЫЙ ФИКС РОУТИНГА (Для Express 5)
-// Вместо app.get('*') используем функцию-заглушку, которая сработает на любой запрос
-app.use((req, res) => {
-  res.sendFile(path.join(distPath, "index.html"));
+// 3. РОУТИНГ ДЛЯ БРАУЗЕРА
+// Если это не запрос к файлу в dist, отдаем index.html
+app.get("*", (req, res) => {
+  const indexPath = path.join(distPath, "index.html");
+  if (fs.existsSync(indexPath)) {
+    res.sendFile(indexPath);
+  } else {
+    res
+      .status(404)
+      .send(
+        "Файл index.html не найден. Убедитесь, что вы сделали npm run build и перенесли папку dist.",
+      );
+  }
 });
 
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
-  console.log(`>>> Skadik запущен на порту ${PORT}`);
+  console.log(`>>> Skadik успешно запущен на порту ${PORT}`);
 });
