@@ -62,6 +62,18 @@ io.on("connection", (socket) => {
     io.emit("update_users", Object.values(users));
   });
 
+  // --- ЛОГИКА "ПЕЧАТАЕТ..." ---
+  socket.on("typing", (data) => {
+    // data = { from, to }
+    // Рассылаем всем, фронтенд сам отфильтрует, кому это показывать
+    io.emit("user_typing", data);
+  });
+
+  socket.on("stop_typing", (data) => {
+    io.emit("user_stop_typing", data);
+  });
+  // ----------------------------
+
   // --- ЛОГИКА ПЕРЕДАЧИ МУЗЫКИ ---
   socket.on("ask_for_music", (targetName) => {
     const target = Object.values(users).find(
@@ -118,6 +130,10 @@ io.on("connection", (socket) => {
   socket.on("disconnect", () => {
     if (users[socket.id]) {
       console.log(`Пользователь ${users[socket.id].username} вышел`);
+
+      // Чтобы статус "печатает" не завис после выхода, шлем стоп-сигнал
+      io.emit("user_stop_typing", { from: users[socket.id].username });
+
       delete users[socket.id];
       io.emit("update_users", Object.values(users));
     }
