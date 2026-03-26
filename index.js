@@ -62,17 +62,23 @@ io.on("connection", (socket) => {
     io.emit("update_users", Object.values(users));
   });
 
+  // --- ЛОГИКА СТАТУСА ПРОЧТЕНИЯ (НОВОЕ) ---
+  socket.on("mark_as_read", (data) => {
+    // data = { chatPartner: "имя_отправителя", reader: "мое_имя" }
+    console.log(`${data.reader} прочитал сообщения от ${data.chatPartner}`);
+    // Рассылаем событие всем, фронт сам поймет, в каком чате обновить галочки
+    io.emit("messages_marked_read", data);
+  });
+  // ----------------------------------------
+
   // --- ЛОГИКА "ПЕЧАТАЕТ..." ---
   socket.on("typing", (data) => {
-    // data = { from, to }
-    // Рассылаем всем, фронтенд сам отфильтрует, кому это показывать
     io.emit("user_typing", data);
   });
 
   socket.on("stop_typing", (data) => {
     io.emit("user_stop_typing", data);
   });
-  // ----------------------------
 
   // --- ЛОГИКА ПЕРЕДАЧИ МУЗЫКИ ---
   socket.on("ask_for_music", (targetName) => {
@@ -94,27 +100,22 @@ io.on("connection", (socket) => {
       });
     }
   });
-  // --- КОНЕЦ ЛОГИКИ МУЗЫКИ ---
 
   socket.on("send_message", (msgData) => {
     if (msgData.to) {
       const toName = msgData.to.toLowerCase();
-      // Ищем получателя в онлайне
       const targetUser = Object.values(users).find(
         (u) => u.username && u.username.toLowerCase() === toName,
       );
 
       if (targetUser) {
-        // Если онлайн — шлем сразу на конкретный сокет
         io.to(targetUser.socketId).emit("receive_message", msgData);
       } else {
-        // Если оффлайн — в очередь
         if (!messageQueue[toName]) messageQueue[toName] = [];
         messageQueue[toName].push(msgData);
         console.log(`Сообщение для ${toName} сохранено в очередь (оффлайн)`);
       }
     } else {
-      // Общий чат
       io.emit("receive_message", msgData);
     }
   });
@@ -130,10 +131,7 @@ io.on("connection", (socket) => {
   socket.on("disconnect", () => {
     if (users[socket.id]) {
       console.log(`Пользователь ${users[socket.id].username} вышел`);
-
-      // Чтобы статус "печатает" не завис после выхода, шлем стоп-сигнал
       io.emit("user_stop_typing", { from: users[socket.id].username });
-
       delete users[socket.id];
       io.emit("update_users", Object.values(users));
     }
