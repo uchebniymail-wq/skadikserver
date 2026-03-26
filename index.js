@@ -13,46 +13,73 @@ const server = http.createServer(app);
 // Настройки сокетов
 const io = new Server(server, {
   cors: { origin: "*" },
-  maxHttpBufferSize: 1e8, // 100 МБ лимит для тяжелых фото и ГС
+  maxHttpBufferSize: 1e8, // 100 МБ лимит
   pingTimeout: 60000,
   transports: ["websocket", "polling"],
 });
 
 const distPath = path.join(__dirname, "dist");
 
-// 1. ПОДКЛЮЧЕНИЕ СТАТИКИ (JS, CSS, Картинки из папки dist)
+// 1. ПОДКЛЮЧЕНИЕ СТАТИКИ
 app.use(express.static(distPath));
 
 // 2. ЛОГИКА МЕССЕНДЖЕРА
 let users = {};
-let messageQueue = {}; // Очередь для оффлайн сообщений { "username": [messages] }
+let messageQueue = {};
 
 io.on("connection", (socket) => {
   console.log(`Новое подключение: ${socket.id}`);
 
-  // Вход пользователя + проверка очереди
+  // Вход пользователя
   socket.on("user_join", (userData) => {
     if (!userData || !userData.username) return;
 
+    // Сохраняем пользователя по socket.id для быстрого поиска
     users[socket.id] = { ...userData, socketId: socket.id };
     const myName = userData.username.toLowerCase();
 
-    // Отправляем накопленные оффлайн сообщения
     if (messageQueue[myName] && messageQueue[myName].length > 0) {
-      console.log(
-        `Отдаю оффлайн сообщения для ${userData.username} (${messageQueue[myName].length} шт.)`,
-      );
       messageQueue[myName].forEach((msg) => {
         socket.emit("receive_message", msg);
       });
-      delete messageQueue[myName]; // Очищаем после доставки
+      delete messageQueue[myName];
     }
 
     console.log(`Юзер ${userData.username} в сети`);
     io.emit("update_users", Object.values(users));
   });
 
-  // Отправка сообщений (с проверкой онлайна)
+  // --- ЛОГИКА ПЕРЕДАЧИ МУЗЫКИ ---
+
+  // Юзер А запрашивает музыку у Юзера Б
+  socket.on("ask_for_music", (targetName) => {
+    const target = Object.values(users).find(
+      (u) =>
+        u.username && u.username.toLowerCase() === targetName.toLowerCase(),
+    );
+
+    if (target) {
+      console.log(`Запрос музыки: от ${socket.id} к ${target.username}`);
+      // Отправляем запрос конкретно владельцу музыки
+      io.to(target.socketId).emit("request_music", socket.id);
+    }
+  });
+
+  // Юзер Б отправляет файл серверу, а сервер пересылает его Юзеру А
+  socket.on("send_music_to_user", (data) => {
+    if (data.to) {
+      console.log(`Пересылка музыки для сокета: ${data.to}`);
+      // В данные добавляем имя отправителя, чтобы ProfileModal понял, чья это музыка
+      const sender = users[socket.id];
+      io.to(data.to).emit("receive_music", {
+        ...data,
+        from: sender ? sender.username : null,
+      });
+    }
+  });
+
+  // --- КОНЕЦ ЛОГИКИ МУЗЫКИ ---
+
   socket.on("send_message", (msgData) => {
     if (msgData.to) {
       const toName = msgData.to.toLowerCase();
@@ -61,43 +88,24 @@ io.on("connection", (socket) => {
       );
 
       if (isOnline) {
-        console.log(`Рассылаю сообщение для ${msgData.to} (в сети)`);
         io.emit("receive_message", msgData);
       } else {
-        // Сохраняем в очередь, если человек оффлайн
         if (!messageQueue[toName]) messageQueue[toName] = [];
         messageQueue[toName].push(msgData);
-        console.log(`Сообщение для ${toName} сохранено в оффлайн-очередь`);
       }
     } else {
-      // Если адресат не указан (общий чат), просто рассылаем всем
-      console.log("Рассылаю сообщение в общий чат");
       io.emit("receive_message", msgData);
     }
   });
 
-  // Удаление сообщения
   socket.on("delete_message", (msgId) => {
-    if (msgId) {
-      console.log(`Удаление сообщения: ${msgId}`);
-      io.emit("message_deleted", msgId);
-    }
+    if (msgId) io.emit("message_deleted", msgId);
   });
 
-  // Редактирование сообщения
   socket.on("edit_message", (data) => {
-    if (data && data.id) {
-      console.log(`Редактирование сообщения ${data.id}`);
-      io.emit("message_edited", data);
-    }
+    if (data && data.id) io.emit("message_edited", data);
   });
 
-  // Статус "Прочитано"
-  socket.on("mark_read", (data) => {
-    io.emit("status_updated", data);
-  });
-
-  // Выход/отключение
   socket.on("disconnect", () => {
     if (users[socket.id]) {
       console.log(`Пользователь ${users[socket.id].username} вышел`);
@@ -107,16 +115,13 @@ io.on("connection", (socket) => {
   });
 });
 
-// 3. ФИНАЛЬНЫЙ ФИКС ДЛЯ SPA (React/Vite)
-// Используем middleware вместо '*' для предотвращения PathError
+// 3. ФИНАЛЬНЫЙ ФИКС ДЛЯ SPA
 app.use((req, res) => {
   const indexPath = path.join(distPath, "index.html");
   if (fs.existsSync(indexPath)) {
     res.sendFile(indexPath);
   } else {
-    res
-      .status(404)
-      .send("Папка dist или index.html не найдены на сервере. Сделайте build!");
+    res.status(404).send("Папка dist не найдена. Сделайте build!");
   }
 });
 
