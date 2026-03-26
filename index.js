@@ -53,9 +53,24 @@ const io = new Server(server, {
 const distPath = path.join(__dirname, "dist");
 app.use(express.static(distPath));
 
-// Временные объекты для текущей сессии (активные юзеры и очередь)
-let activeUsers = {};
+// Временные объекты для текущей сессии
+let activeUsers = {}; // Храним { socketId: { username, ... } }
 let messageQueue = {};
+
+// Вспомогательная функция для рассылки актуального списка пользователей с их статусом
+const broadcastUsersUpdate = async () => {
+  const allRegistered = await User.find({});
+
+  // Мапим список из БД, добавляя флаг isOnline на основе оперативной памяти activeUsers
+  const updatedList = allRegistered.map((u) => {
+    const isOnline = Object.values(activeUsers).some(
+      (active) => active.username.toLowerCase() === u.username.toLowerCase(),
+    );
+    return { ...u._doc, isOnline };
+  });
+
+  io.emit("update_users", updatedList);
+};
 
 io.on("connection", (socket) => {
   console.log(`Новое подключение: ${socket.id}`);
@@ -71,7 +86,12 @@ io.on("connection", (socket) => {
       { upsert: true, new: true },
     );
 
-    activeUsers[socket.id] = updatedUser;
+    // Сохраняем в оперативную память активный сокет
+    activeUsers[socket.id] = {
+      username: userData.username.toLowerCase(),
+      socketId: socket.id,
+    };
+
     const myName = userData.username.toLowerCase();
 
     // Проверка оффлайн-очереди
@@ -86,13 +106,12 @@ io.on("connection", (socket) => {
       }, 500);
     }
 
-    // Рассылаем всем список ВСЕХ зарегистрированных пользователей из БД
-    const allUsers = await User.find({});
-    io.emit("update_users", allUsers);
-    console.log(`Юзер ${userData.username} в сети`);
+    // Рассылаем всем обновленный список с учетом статуса Online
+    await broadcastUsersUpdate();
+    console.log(`Юзер ${userData.username} вошел в сеть`);
   });
 
-  // Запрос истории сообщений из БД
+  // Запрос истории сообщений
   socket.on("get_history", async (data) => {
     const history = await Message.find({
       $or: [
@@ -105,7 +124,6 @@ io.on("connection", (socket) => {
 
   // Статус прочтения
   socket.on("mark_as_read", async (data) => {
-    // Обновляем статус в БД
     await Message.updateMany(
       { from: data.chatPartner, to: data.reader, read: false },
       { $set: { read: true } },
@@ -139,21 +157,19 @@ io.on("connection", (socket) => {
 
   // Отправка сообщения
   socket.on("send_message", async (msgData) => {
-    // 1. Сохраняем в MongoDB навсегда
     const newMessage = new Message(msgData);
     await newMessage.save();
 
     if (msgData.to) {
       const toName = msgData.to.toLowerCase();
-      // Ищем получателя среди активных подключений
-      const targetSocket = Object.values(activeUsers).find(
-        (u) => u.username && u.username.toLowerCase() === toName,
+      // Ищем получателя по имени в активных сессиях
+      const targetSocketId = Object.keys(activeUsers).find(
+        (sid) => activeUsers[sid].username === toName,
       );
 
-      if (targetSocket) {
-        io.to(targetSocket.socketId).emit("receive_message", msgData);
+      if (targetSocketId) {
+        io.to(targetSocketId).emit("receive_message", msgData);
       } else {
-        // Если оффлайн — кладем в очередь (для мгновенного получения при входе)
         if (!messageQueue[toName]) messageQueue[toName] = [];
         messageQueue[toName].push(msgData);
       }
@@ -181,15 +197,19 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("disconnect", () => {
+  // Обработка отключения
+  socket.on("disconnect", async () => {
     if (activeUsers[socket.id]) {
       const username = activeUsers[socket.id].username;
-      console.log(`Пользователь ${username} вышел`);
+      console.log(`Пользователь ${username} покинул сеть`);
+
       io.emit("user_stop_typing", { from: username });
+
+      // Удаляем из оперативной памяти
       delete activeUsers[socket.id];
 
-      // Снова рассылаем список (опционально можно добавить статус "был в сети")
-      User.find({}).then((allUsers) => io.emit("update_users", allUsers));
+      // Рассылаем всем обновленный список, где этот юзер теперь оффлайн
+      await broadcastUsersUpdate();
     }
   });
 });
@@ -200,11 +220,11 @@ app.use((req, res) => {
   if (fs.existsSync(indexPath)) {
     res.sendFile(indexPath);
   } else {
-    res.status(404).send("Папка dist не найдена. Сделайте build!");
+    res.status(404).send("Папка dist не найдена.");
   }
 });
 
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
-  console.log(`>>> Skadik Live on ${PORT} (MongoDB Edition)`);
+  console.log(`>>> Skadik Server live on ${PORT}`);
 });
