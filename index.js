@@ -11,14 +11,14 @@ app.use(cors());
 
 const server = http.createServer(app);
 
-// --- 1. ПОДКЛЮЧЕНИЕ К БАЗЕ ---
+// 1. ПОДКЛЮЧЕНИЕ К БАЗЕ
 const MONGO_URI = process.env.MONGO_URI;
 mongoose
   .connect(MONGO_URI)
-  .then(() => console.log(">>> MongoDB подключена успешно!"))
-  .catch((err) => console.error("Ошибка подключения к БД:", err));
+  .then(() => console.log(">>> MongoDB подключена!"))
+  .catch((err) => console.error("Ошибка БД:", err));
 
-// --- 2. СХЕМЫ ДАННЫХ ---
+// СХЕМЫ
 const MessageSchema = new mongoose.Schema({
   from: String,
   to: String,
@@ -27,7 +27,6 @@ const MessageSchema = new mongoose.Schema({
   type: String,
   time: String,
   read: { type: Boolean, default: false },
-  edited: { type: Boolean, default: false },
   id: Number,
 });
 const Message = mongoose.model("Message", MessageSchema);
@@ -38,71 +37,52 @@ const UserSchema = new mongoose.Schema({
   musicFile: String,
   musicName: String,
   socketId: String,
-  lastSeen: { type: Date, default: Date.now },
 });
 const User = mongoose.model("User", UserSchema);
 
-// --- 3. НАСТРОЙКИ SOCKET.IO ---
+// Настройки сокетов
 const io = new Server(server, {
   cors: { origin: "*" },
-  maxHttpBufferSize: 1e8, // 100 МБ
+  maxHttpBufferSize: 1e8,
   pingTimeout: 60000,
-  transports: ["websocket", "polling"],
 });
 
-// --- 4. СТАТИКА (Важно для Render) ---
-// Используем __dirname, чтобы путь всегда был абсолютным
-const distPath = path.resolve(__dirname, "dist");
+const distPath = path.join(__dirname, "dist");
 
-// Сначала проверяем, существуют ли реальные файлы (js, css, картинки)
+// 2. ПОДКЛЮЧЕНИЕ СТАТИКИ
 app.use(express.static(distPath));
 
-// Временные объекты сессии
+// 3. ЛОГИКА СОКЕТОВ
 let activeUsers = {};
-let messageQueue = {};
-
-const broadcastUsersUpdate = async () => {
-  const allRegistered = await User.find({});
-  const updatedList = allRegistered.map((u) => {
-    const isOnline = Object.values(activeUsers).some(
-      (active) => active.username.toLowerCase() === u.username.toLowerCase(),
-    );
-    return { ...u._doc, isOnline };
-  });
-  io.emit("update_users", updatedList);
-};
 
 io.on("connection", (socket) => {
-  console.log(`Новое подключение: ${socket.id}`);
-
   socket.on("user_join", async (userData) => {
-    if (!userData || !userData.username) return;
-
-    await User.findOneAndUpdate(
-      { username: userData.username },
-      { ...userData, socketId: socket.id, lastSeen: Date.now() },
-      { upsert: true, new: true },
-    );
-
+    if (!userData) return;
     activeUsers[socket.id] = {
       username: userData.username.toLowerCase(),
       socketId: socket.id,
     };
 
-    const myName = userData.username.toLowerCase();
+    await User.findOneAndUpdate(
+      { username: userData.username },
+      { ...userData, socketId: socket.id },
+      { upsert: true },
+    );
 
-    if (messageQueue[myName] && messageQueue[myName].length > 0) {
-      setTimeout(() => {
-        if (messageQueue[myName]) {
-          messageQueue[myName].forEach((msg) => {
-            socket.emit("receive_message", msg);
-          });
-          delete messageQueue[myName];
-        }
-      }, 500);
-    }
+    const allUsers = await User.find({});
+    const listWithStatus = allUsers.map((u) => ({
+      ...u._doc,
+      isOnline: Object.values(activeUsers).some(
+        (a) => a.username === u.username.toLowerCase(),
+      ),
+    }));
+    io.emit("update_users", listWithStatus);
+  });
 
-    await broadcastUsersUpdate();
+  socket.on("send_message", async (msgData) => {
+    const newMessage = new Message(msgData);
+    await newMessage.save();
+    io.emit("receive_message", msgData);
   });
 
   socket.on("get_history", async (data) => {
@@ -111,7 +91,7 @@ io.on("connection", (socket) => {
         { from: data.me, to: data.partner },
         { from: data.partner, to: data.me },
       ],
-    }).sort({ id: 1 });
+    }).sort({ _id: 1 });
     socket.emit("chat_history", history);
   });
 
@@ -123,88 +103,34 @@ io.on("connection", (socket) => {
     io.emit("messages_marked_read", data);
   });
 
-  socket.on("typing", (data) => io.emit("user_typing", data));
-  socket.on("stop_typing", (data) => io.emit("user_stop_typing", data));
-
-  socket.on("ask_for_music", async (targetName) => {
-    const target = await User.findOne({
-      username: new RegExp(`^${targetName}$`, "i"),
-    });
-    if (target && target.socketId) {
-      io.to(target.socketId).emit("request_music", socket.id);
-    }
+  socket.on("ask_for_music", (targetName) => {
+    const target = Object.values(activeUsers).find(
+      (u) => u.username === targetName.toLowerCase(),
+    );
+    if (target) io.to(target.socketId).emit("request_music", socket.id);
   });
 
   socket.on("send_music_to_user", (data) => {
-    if (data.to) {
-      const sender = activeUsers[socket.id];
-      io.to(data.to).emit("receive_music", {
-        ...data,
-        from: sender ? sender.username : null,
-      });
-    }
+    io.to(data.to).emit("receive_music", data);
   });
 
-  socket.on("send_message", async (msgData) => {
-    const newMessage = new Message(msgData);
-    await newMessage.save();
-
-    if (msgData.to) {
-      const toName = msgData.to.toLowerCase();
-      const targetSocketId = Object.keys(activeUsers).find(
-        (sid) => activeUsers[sid].username === toName,
-      );
-
-      if (targetSocketId) {
-        io.to(targetSocketId).emit("receive_message", msgData);
-      } else {
-        if (!messageQueue[toName]) messageQueue[toName] = [];
-        messageQueue[toName].push(msgData);
-      }
-    } else {
-      io.emit("receive_message", msgData);
-    }
-  });
-
-  socket.on("delete_message", async (msgId) => {
-    if (msgId) {
-      await Message.deleteOne({ id: msgId });
-      io.emit("message_deleted", msgId);
-    }
-  });
-
-  socket.on("edit_message", async (data) => {
-    if (data && data.id) {
-      await Message.updateOne(
-        { id: data.id },
-        { text: data.text, edited: true },
-      );
-      io.emit("message_edited", data);
-    }
-  });
-
-  socket.on("disconnect", async () => {
-    if (activeUsers[socket.id]) {
-      const username = activeUsers[socket.id].username;
-      delete activeUsers[socket.id];
-      await broadcastUsersUpdate();
-    }
+  socket.on("disconnect", () => {
+    delete activeUsers[socket.id];
   });
 });
 
-// --- 5. ФИКС ДЛЯ SPA (Должен быть ПОСЛЕДНИМ маршрутом) ---
-app.get("*", (req, res) => {
+// 4. ГАРАНТИРОВАННЫЙ ФИКС ДЛЯ EXPRESS 5 (УБРАЛИ '*')
+// Эта функция сработает на любой путь, который не нашелся выше.
+app.use((req, res) => {
   const indexPath = path.join(distPath, "index.html");
   if (fs.existsSync(indexPath)) {
     res.sendFile(indexPath);
   } else {
-    res
-      .status(404)
-      .send("Ошибка: Сборка фронтенда (папка dist) не найдена на сервере.");
+    res.status(404).send("Сделайте билд! Файл index.html не найден.");
   }
 });
 
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
-  console.log(`>>> Skadik Server live on ${PORT}`);
+  console.log(`>>> Skadik запущен на порту ${PORT}`);
 });
