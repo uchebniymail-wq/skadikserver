@@ -3,27 +3,32 @@ const http = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
 const path = require("path");
+const fs = require("fs");
 
 const app = express();
 app.use(cors());
 
-// Раздача статики
-app.use(express.static(path.join(__dirname, "dist")));
-
 const server = http.createServer(app);
 
+// Настройки сокетов
 const io = new Server(server, {
   cors: { origin: "*" },
-  maxHttpBufferSize: 1e8, // 100MB
+  maxHttpBufferSize: 1e8, // 100 МБ лимит для тяжелых фото и ГС
   pingTimeout: 60000,
   transports: ["websocket", "polling"],
 });
 
+const distPath = path.join(__dirname, "dist");
+
+// 1. ПОДКЛЮЧЕНИЕ СТАТИКИ (JS, CSS, Картинки из папки dist)
+app.use(express.static(distPath));
+
+// 2. ЛОГИКА МЕССЕНДЖЕРА
 let users = {};
 let messageQueue = {}; // Очередь для оффлайн сообщений { "username": [messages] }
 
 io.on("connection", (socket) => {
-  console.log(`Подключен клиент: ${socket.id}`);
+  console.log(`Новое подключение: ${socket.id}`);
 
   // Вход пользователя + проверка очереди
   socket.on("user_join", (userData) => {
@@ -40,15 +45,15 @@ io.on("connection", (socket) => {
       messageQueue[myName].forEach((msg) => {
         socket.emit("receive_message", msg);
       });
-      messageQueue[myName] = []; // Очищаем после доставки
+      delete messageQueue[myName]; // Очищаем после доставки
     }
 
+    console.log(`Юзер ${userData.username} в сети`);
     io.emit("update_users", Object.values(users));
   });
 
   // Отправка сообщений (с проверкой онлайна)
   socket.on("send_message", (msgData) => {
-    // Проверяем, есть ли поле 'to' (адресат)
     if (msgData.to) {
       const toName = msgData.to.toLowerCase();
       const isOnline = Object.values(users).find(
@@ -63,12 +68,10 @@ io.on("connection", (socket) => {
         if (!messageQueue[toName]) messageQueue[toName] = [];
         messageQueue[toName].push(msgData);
         console.log(`Сообщение для ${toName} сохранено в оффлайн-очередь`);
-
-        // Опционально: можно отправить подтверждение отправителю,
-        // что сообщение сохранено (например, socket.emit("message_queued", msgData.id))
       }
     } else {
       // Если адресат не указан (общий чат), просто рассылаем всем
+      console.log("Рассылаю сообщение в общий чат");
       io.emit("receive_message", msgData);
     }
   });
@@ -104,12 +107,20 @@ io.on("connection", (socket) => {
   });
 });
 
-// Роутинг для SPA
-app.get("*", (req, res) => {
-  res.sendFile(path.join(__dirname, "dist", "index.html"));
+// 3. ФИНАЛЬНЫЙ ФИКС ДЛЯ SPA (React/Vite)
+// Используем middleware вместо '*' для предотвращения PathError
+app.use((req, res) => {
+  const indexPath = path.join(distPath, "index.html");
+  if (fs.existsSync(indexPath)) {
+    res.sendFile(indexPath);
+  } else {
+    res
+      .status(404)
+      .send("Папка dist или index.html не найдены на сервере. Сделайте build!");
+  }
 });
 
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`>>> Skadik Messenger запущен на порту ${PORT}`);
 });
