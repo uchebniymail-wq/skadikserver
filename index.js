@@ -6,10 +6,14 @@ const path = require("path");
 
 const app = express();
 app.use(cors());
+
 const server = http.createServer(app);
+
 const io = new Server(server, {
   cors: { origin: "*" },
-  maxHttpBufferSize: 1e8, // 100MB для картинок и голоса
+  maxHttpBufferSize: 1e8, // 100MB для тяжелых фото и голоса
+  pingTimeout: 60000,
+  transports: ["websocket", "polling"],
 });
 
 app.use(express.static(path.join(__dirname, "dist")));
@@ -17,23 +21,25 @@ app.use(express.static(path.join(__dirname, "dist")));
 let users = {};
 
 io.on("connection", (socket) => {
-  // Вход
+  // Вход пользователя
   socket.on("user_join", (userData) => {
     users[socket.id] = { ...userData, socketId: socket.id };
     io.emit("update_users", Object.values(users));
   });
 
-  // Отправка (текст, фото, голос)
+  // Отправка сообщений (текст, фото, голос)
   socket.on("send_message", (msg) => {
-    io.emit("receive_message", msg);
+    // Добавил логирование из твоего первого фрагмента
+    console.log("Рассылаю сообщение:", msg.text || "файл/фото");
+    io.emit("receive_message", msg); // Рассылаем ВСЕМ
   });
 
-  // Удаление
+  // Удаление сообщения
   socket.on("delete_message", (msgId) => {
     io.emit("message_deleted", msgId);
   });
 
-  // Редактирование
+  // Редактирование сообщения
   socket.on("edit_message", (data) => {
     io.emit("message_edited", data);
   });
@@ -43,13 +49,17 @@ io.on("connection", (socket) => {
     io.emit("status_updated", data);
   });
 
+  // Выход/отключение
   socket.on("disconnect", () => {
     delete users[socket.id];
     io.emit("update_users", Object.values(users));
   });
 });
 
+// Роутинг для SPA (React/Vue)
 app.use((req, res) => res.sendFile(path.join(__dirname, "dist", "index.html")));
 
 const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => console.log(`Server running on ${PORT}`));
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
