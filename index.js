@@ -25,7 +25,7 @@ app.use(express.static(distPath));
 
 // 2. ЛОГИКА МЕССЕНДЖЕРА
 let users = {};
-let messageQueue = {};
+let messageQueue = {}; // Очередь: { "username": [msg1, msg2] }
 
 io.on("connection", (socket) => {
   console.log(`Новое подключение: ${socket.id}`);
@@ -34,15 +34,28 @@ io.on("connection", (socket) => {
   socket.on("user_join", (userData) => {
     if (!userData || !userData.username) return;
 
-    // Сохраняем пользователя по socket.id для быстрого поиска
+    // Сохраняем пользователя
     users[socket.id] = { ...userData, socketId: socket.id };
     const myName = userData.username.toLowerCase();
 
+    // ПРОВЕРКА ОФФЛАЙН-ОЧЕРЕДИ С ЗАДЕРЖКОЙ
     if (messageQueue[myName] && messageQueue[myName].length > 0) {
-      messageQueue[myName].forEach((msg) => {
-        socket.emit("receive_message", msg);
-      });
-      delete messageQueue[myName];
+      console.log(
+        `Подготовка к отправке ${messageQueue[myName].length} сообщений для ${userData.username}`,
+      );
+
+      // Даем фронтенду 500мс, чтобы прогрузить useEffect и слушатели сокетов
+      setTimeout(() => {
+        if (messageQueue[myName]) {
+          messageQueue[myName].forEach((msg) => {
+            socket.emit("receive_message", msg);
+          });
+          console.log(
+            `Оффлайн сообщения для ${userData.username} успешно отправлены`,
+          );
+          delete messageQueue[myName];
+        }
+      }, 500);
     }
 
     console.log(`Юзер ${userData.username} в сети`);
@@ -50,26 +63,18 @@ io.on("connection", (socket) => {
   });
 
   // --- ЛОГИКА ПЕРЕДАЧИ МУЗЫКИ ---
-
-  // Юзер А запрашивает музыку у Юзера Б
   socket.on("ask_for_music", (targetName) => {
     const target = Object.values(users).find(
       (u) =>
         u.username && u.username.toLowerCase() === targetName.toLowerCase(),
     );
-
     if (target) {
-      console.log(`Запрос музыки: от ${socket.id} к ${target.username}`);
-      // Отправляем запрос конкретно владельцу музыки
       io.to(target.socketId).emit("request_music", socket.id);
     }
   });
 
-  // Юзер Б отправляет файл серверу, а сервер пересылает его Юзеру А
   socket.on("send_music_to_user", (data) => {
     if (data.to) {
-      console.log(`Пересылка музыки для сокета: ${data.to}`);
-      // В данные добавляем имя отправителя, чтобы ProfileModal понял, чья это музыка
       const sender = users[socket.id];
       io.to(data.to).emit("receive_music", {
         ...data,
@@ -77,23 +82,27 @@ io.on("connection", (socket) => {
       });
     }
   });
-
   // --- КОНЕЦ ЛОГИКИ МУЗЫКИ ---
 
   socket.on("send_message", (msgData) => {
     if (msgData.to) {
       const toName = msgData.to.toLowerCase();
-      const isOnline = Object.values(users).find(
+      // Ищем получателя в онлайне
+      const targetUser = Object.values(users).find(
         (u) => u.username && u.username.toLowerCase() === toName,
       );
 
-      if (isOnline) {
-        io.emit("receive_message", msgData);
+      if (targetUser) {
+        // Если онлайн — шлем сразу на конкретный сокет
+        io.to(targetUser.socketId).emit("receive_message", msgData);
       } else {
+        // Если оффлайн — в очередь
         if (!messageQueue[toName]) messageQueue[toName] = [];
         messageQueue[toName].push(msgData);
+        console.log(`Сообщение для ${toName} сохранено в очередь (оффлайн)`);
       }
     } else {
+      // Общий чат
       io.emit("receive_message", msgData);
     }
   });
@@ -115,7 +124,7 @@ io.on("connection", (socket) => {
   });
 });
 
-// 3. ФИНАЛЬНЫЙ ФИКС ДЛЯ SPA
+// 3. ФИНАЛЬНЫЙ ФИКС ДЛЯ SPA (React/Vite)
 app.use((req, res) => {
   const indexPath = path.join(distPath, "index.html");
   if (fs.existsSync(indexPath)) {
