@@ -28,7 +28,6 @@ const MessageSchema = new mongoose.Schema({
   time: String,
   read: { type: Boolean, default: false },
   id: { type: Number, index: true },
-  // Добавляем поле для хранения реакций { "😂": ["user1", "user2"], ... }
   reactions: { type: Map, of: [String], default: {} },
 });
 const Message = mongoose.model("Message", MessageSchema);
@@ -62,8 +61,9 @@ app.use(express.static(distPath));
 // 3. ЛОГИКА СОКЕТОВ
 let activeUsers = {};
 
+// ОПТИМИЗИРОВАННАЯ ФУНКЦИЯ: берем только легкие поля для общего списка
 const getUsersListWithStatus = async () => {
-  const allUsers = await User.find({});
+  const allUsers = await User.find({}, "username avatar status steamUrl bio");
   return allUsers.map((u) => {
     const isActive = Object.values(activeUsers).some(
       (a) => a.username === u.username.toLowerCase(),
@@ -86,6 +86,7 @@ io.on("connection", (socket) => {
       socketId: socket.id,
     };
 
+    // Сохраняем полный профиль
     await User.findOneAndUpdate(
       { username: userData.username },
       { ...userData, socketId: socket.id },
@@ -94,6 +95,16 @@ io.on("connection", (socket) => {
 
     const listWithStatus = await getUsersListWithStatus();
     io.emit("update_users", listWithStatus);
+  });
+
+  // НОВОЕ: Запрос полных данных профиля по требованию (для ProfileModal)
+  socket.on("get_full_profile", async (username) => {
+    try {
+      const fullUser = await User.findOne({ username });
+      socket.emit("receive_full_profile", fullUser);
+    } catch (err) {
+      console.error("Ошибка получения профиля:", err);
+    }
   });
 
   // Обновление профиля
@@ -136,16 +147,14 @@ io.on("connection", (socket) => {
     }
   });
 
-  // РЕАКЦИИ (Новое событие)
+  // РЕАКЦИИ
   socket.on("add_reaction", async (data) => {
     try {
-      // data = { msgId, reaction, username }
       const message = await Message.findOne({ id: data.msgId });
       if (message) {
         const currentReactions = message.reactions || new Map();
         const users = currentReactions.get(data.reaction) || [];
 
-        // Если юзер уже ставил эту реакцию — убираем, если нет — добавляем (toggle)
         if (users.includes(data.username)) {
           currentReactions.set(
             data.reaction,
@@ -159,27 +168,41 @@ io.on("connection", (socket) => {
         message.reactions = currentReactions;
         await message.save();
 
-        // Рассылаем всем обновленные данные
         io.emit("reaction_updated", {
           msgId: data.msgId,
           reactions: Object.fromEntries(message.reactions),
         });
       }
     } catch (err) {
-      console.error("Ошибка при добавлении реакции:", err);
+      console.error("Ошибка реакций:", err);
     }
   });
 
-  // Стикеры
-  socket.on("send_sticker", (data) => {
-    io.emit("receive_message", { ...data, type: "sticker", id: Date.now() });
-  });
-
-  // Сообщения
+  // СООБЩЕНИЯ
   socket.on("send_message", async (msgData) => {
     const newMessage = new Message(msgData);
     await newMessage.save();
     io.emit("receive_message", msgData);
+  });
+
+  // РЕДАКТИРОВАНИЕ
+  socket.on("edit_message", async (data) => {
+    try {
+      await Message.updateOne({ id: data.id }, { $set: { text: data.text } });
+      io.emit("message_edited", data);
+    } catch (err) {
+      console.error("Ошибка редактирования:", err);
+    }
+  });
+
+  // УДАЛЕНИЕ
+  socket.on("delete_message", async (id) => {
+    try {
+      await Message.deleteOne({ id });
+      io.emit("message_deleted", id);
+    } catch (err) {
+      console.error("Ошибка удаления:", err);
+    }
   });
 
   // История чата
@@ -202,7 +225,11 @@ io.on("connection", (socket) => {
     io.emit("messages_marked_read", data);
   });
 
-  // Музыка
+  // Музыка и стикеры
+  socket.on("send_sticker", (data) => {
+    io.emit("receive_message", { ...data, type: "sticker", id: Date.now() });
+  });
+
   socket.on("ask_for_music", (targetName) => {
     const target = Object.values(activeUsers).find(
       (u) => u.username === targetName.toLowerCase(),
