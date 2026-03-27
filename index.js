@@ -56,6 +56,7 @@ app.use(express.static(distPath));
 let activeUsers = {};
 
 io.on("connection", (socket) => {
+  // Вход пользователя
   socket.on("user_join", async (userData) => {
     if (!userData) return;
     activeUsers[socket.id] = {
@@ -79,12 +80,37 @@ io.on("connection", (socket) => {
     io.emit("update_users", listWithStatus);
   });
 
+  // НОВОЕ: Обновление профиля (аватар, музыка)
+  socket.on("update_profile", async (updatedData) => {
+    try {
+      // 1. Обновляем в базе данных MongoDB
+      await User.findOneAndUpdate(
+        { username: updatedData.username },
+        {
+          avatar: updatedData.avatar,
+          musicFile: updatedData.musicFile,
+          musicName: updatedData.musicName,
+        },
+        { new: true },
+      );
+
+      // 2. Рассылаем всем сигнал: "Этот пользователь обновился!"
+      io.emit("profile_updated", updatedData);
+
+      console.log(`Профиль ${updatedData.username} обновлен и разослан всем`);
+    } catch (err) {
+      console.error("Ошибка при обновлении профиля:", err);
+    }
+  });
+
+  // Сообщения
   socket.on("send_message", async (msgData) => {
     const newMessage = new Message(msgData);
     await newMessage.save();
     io.emit("receive_message", msgData);
   });
 
+  // История чата
   socket.on("get_history", async (data) => {
     const history = await Message.find({
       $or: [
@@ -95,6 +121,7 @@ io.on("connection", (socket) => {
     socket.emit("chat_history", history);
   });
 
+  // Прочитанные сообщения
   socket.on("mark_as_read", async (data) => {
     await Message.updateMany(
       { from: data.chatPartner, to: data.reader, read: false },
@@ -103,6 +130,7 @@ io.on("connection", (socket) => {
     io.emit("messages_marked_read", data);
   });
 
+  // Запрос музыки
   socket.on("ask_for_music", (targetName) => {
     const target = Object.values(activeUsers).find(
       (u) => u.username === targetName.toLowerCase(),
@@ -110,17 +138,18 @@ io.on("connection", (socket) => {
     if (target) io.to(target.socketId).emit("request_music", socket.id);
   });
 
+  // Передача музыки конкретному юзеру
   socket.on("send_music_to_user", (data) => {
     io.to(data.to).emit("receive_music", data);
   });
 
+  // Отключение
   socket.on("disconnect", () => {
     delete activeUsers[socket.id];
   });
 });
 
-// 4. ГАРАНТИРОВАННЫЙ ФИКС ДЛЯ EXPRESS 5 (УБРАЛИ '*')
-// Эта функция сработает на любой путь, который не нашелся выше.
+// 4. ГАРАНТИРОВАННЫЙ ФИКС ДЛЯ EXPRESS 5
 app.use((req, res) => {
   const indexPath = path.join(distPath, "index.html");
   if (fs.existsSync(indexPath)) {
