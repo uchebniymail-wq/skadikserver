@@ -78,30 +78,34 @@ const getUsersListWithStatus = async () => {
 };
 
 io.on("connection", (socket) => {
+  console.log("Новое соединение:", socket.id);
+
   // Вход пользователя
   socket.on("user_join", async (userData) => {
-    if (!userData) return;
+    if (!userData || !userData.username) return;
+    const usernameLow = userData.username.toLowerCase();
+
     activeUsers[socket.id] = {
-      username: userData.username.toLowerCase(),
+      username: usernameLow,
       socketId: socket.id,
     };
 
-    // Сохраняем полный профиль
+    // Сохраняем/обновляем полный профиль
     await User.findOneAndUpdate(
       { username: userData.username },
       { ...userData, socketId: socket.id },
-      { upsert: true },
+      { upsert: true, new: true },
     );
 
     const listWithStatus = await getUsersListWithStatus();
     io.emit("update_users", listWithStatus);
   });
 
-  // НОВОЕ: Запрос полных данных профиля по требованию (для ProfileModal)
+  // Запрос полных данных профиля
   socket.on("get_full_profile", async (username) => {
     try {
-      const fullUser = await User.findOne({ username });
-      socket.emit("receive_full_profile", fullUser);
+      const fullUser = await User.findOne({ username: username });
+      if (fullUser) socket.emit("receive_full_profile", fullUser);
     } catch (err) {
       console.error("Ошибка получения профиля:", err);
     }
@@ -195,22 +199,32 @@ io.on("connection", (socket) => {
     }
   });
 
-  // УДАЛЕНИЕ
+  // УДАЛЕНИЕ (с логами для отладки)
   socket.on("delete_message", async (id) => {
     try {
-      await Message.deleteOne({ id });
+      console.log("Удаляю сообщение с ID:", id);
+      await Message.deleteOne({ id: id });
       io.emit("message_deleted", id);
     } catch (err) {
-      console.error("Ошибка удаления:", err);
+      console.error("Ошибка удаления из базы:", err);
     }
   });
 
-  // История чата
+  // ИСТОРИЯ ЧАТА (с фиксом регистра)
   socket.on("get_history", async (data) => {
     const history = await Message.find({
       $or: [
         { from: data.me, to: data.partner },
         { from: data.partner, to: data.me },
+        // Доп. проверка для разного регистра
+        {
+          from: new RegExp(`^${data.me}$`, "i"),
+          to: new RegExp(`^${data.partner}$`, "i"),
+        },
+        {
+          from: new RegExp(`^${data.partner}$`, "i"),
+          to: new RegExp(`^${data.me}$`, "i"),
+        },
       ],
     }).sort({ _id: 1 });
     socket.emit("chat_history", history);
@@ -249,13 +263,13 @@ io.on("connection", (socket) => {
   });
 });
 
-// ФИКС ДЛЯ EXPRESS
+// ФИКС ДЛЯ EXPRESS (SPA routing)
 app.use((req, res) => {
   const indexPath = path.join(distPath, "index.html");
   if (fs.existsSync(indexPath)) {
     res.sendFile(indexPath);
   } else {
-    res.status(404).send("Сделайте билд!");
+    res.status(404).send("Сделайте билд (npm run build)!");
   }
 });
 
