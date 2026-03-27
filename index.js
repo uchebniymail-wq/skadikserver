@@ -28,7 +28,7 @@ const MessageSchema = new mongoose.Schema({
   time: String,
   read: { type: Boolean, default: false },
   id: { type: Number, index: true },
-  reactions: { type: Map, of: [String], default: {} }, // Список юзеров для каждой реакции
+  reactions: { type: Map, of: [String], default: {} },
 });
 const Message = mongoose.model("Message", MessageSchema);
 
@@ -56,52 +56,50 @@ const distPath = path.join(__dirname, "dist");
 app.use(express.static(distPath));
 
 // 3. ЛОГИКА СОКЕТОВ
-let activeUsers = {};
-
-// Оптимизация: берем только базу для списка контактов
-const getUsersListWithStatus = async () => {
-  // Выбираем только то, что нужно для отображения в сайдбаре (username, avatar, status)
-  const allUsers = await User.find({}).select("username avatar status");
-
-  return allUsers.map((u) => {
-    const isActive = Object.values(activeUsers).some(
-      (a) => a.username === u.username.toLowerCase(),
-    );
-    const isActuallyOnline = isActive && u.status !== "invisible";
-    return {
-      ...u._doc,
-      isOnline: isActuallyOnline,
-      currentStatus: isActuallyOnline ? u.status : "offline",
-    };
-  });
-};
+let activeSockets = {}; // { socketId: username }
 
 io.on("connection", (socket) => {
-  console.log("Новое соединение:", socket.id);
+  console.log("Подключился:", socket.id);
 
-  // Вход: Минимум данных при старте
+  // Функция рассылки списка (теперь внутри io.on для доступа к io)
+  const broadcastOnlineList = async () => {
+    // Выбираем данные для сайдбара, исключая тяжелые поля
+    const allUsers = await User.find({}).select("-musicFile -banner");
+
+    // Получаем список имен, которые СЕЙЧАС подключены
+    const namesOnline = Object.values(activeSockets);
+
+    const updatedList = allUsers.map((u) => {
+      const isActuallyOnline = namesOnline.includes(u.username.toLowerCase());
+      return {
+        ...u._doc,
+        // Человек онлайн, только если его имя в активных сокетах и статус не invisible
+        isOnline: isActuallyOnline && u.status !== "invisible",
+        currentStatus:
+          isActuallyOnline && u.status !== "invisible" ? u.status : "offline",
+      };
+    });
+
+    io.emit("update_users", updatedList);
+  };
+
   socket.on("user_join", async (userData) => {
     if (!userData || !userData.username) return;
-    const usernameLow = userData.username.toLowerCase();
 
-    activeUsers[socket.id] = {
-      username: usernameLow,
-      socketId: socket.id,
-    };
+    const name = userData.username.toLowerCase();
+    activeSockets[socket.id] = name; // Привязываем имя к текущему соединению
 
+    // Обновляем инфо в базе
     await User.findOneAndUpdate(
       { username: userData.username },
       { ...userData, socketId: socket.id },
-      { upsert: true, new: true },
+      { upsert: true },
     );
 
-    const listWithStatus = await getUsersListWithStatus();
-    io.emit("update_users", listWithStatus);
+    broadcastOnlineList();
   });
 
   // --- ЛЕНИВАЯ ЗАГРУЗКА ДАННЫХ ---
-
-  // 1. Запрос текстовых деталей (био, баннер, ссылка)
   socket.on("get_profile_details", async (username) => {
     try {
       const details = await User.findOne({ username }).select(
@@ -113,7 +111,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // 2. Запрос тяжелого аудио-файла (только когда нужно играть музыку)
   socket.on("get_my_music", async (username) => {
     try {
       const user = await User.findOne({ username }).select("musicFile");
@@ -124,7 +121,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Оставляем старый метод для совместимости
   socket.on("get_full_profile", async (username) => {
     try {
       const fullUser = await User.findOne({ username: username });
@@ -134,8 +130,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  // --- ОСТАЛЬНАЯ ЛОГИКА (РЕАКЦИИ, СООБЩЕНИЯ) ---
-
+  // --- ЛОГИКА ВЗАИМОДЕЙСТВИЯ ---
   socket.on("update_profile", async (updatedData) => {
     try {
       await User.findOneAndUpdate(
@@ -143,8 +138,7 @@ io.on("connection", (socket) => {
         { $set: updatedData },
         { new: true },
       );
-      const listWithStatus = await getUsersListWithStatus();
-      io.emit("update_users", listWithStatus);
+      broadcastOnlineList();
       io.emit("profile_updated", updatedData);
     } catch (err) {
       console.error("Ошибка обновления профиля:", err);
@@ -157,8 +151,7 @@ io.on("connection", (socket) => {
         { username: data.username },
         { status: data.status },
       );
-      const listWithStatus = await getUsersListWithStatus();
-      io.emit("update_users", listWithStatus);
+      broadcastOnlineList();
     } catch (err) {
       console.error("Ошибка статуса:", err);
     }
@@ -222,11 +215,10 @@ io.on("connection", (socket) => {
     io.emit("receive_message", { ...data, type: "sticker", id: Date.now() });
   });
 
-  socket.on("disconnect", async () => {
-    delete activeUsers[socket.id];
-    const listWithStatus = await getUsersListWithStatus();
-    io.emit("update_users", listWithStatus);
-    console.log("Юзер отключился:", socket.id);
+  socket.on("disconnect", () => {
+    console.log("Отключился:", activeSockets[socket.id]);
+    delete activeSockets[socket.id];
+    broadcastOnlineList();
   });
 });
 
