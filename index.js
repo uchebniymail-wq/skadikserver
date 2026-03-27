@@ -28,7 +28,7 @@ const MessageSchema = new mongoose.Schema({
   time: String,
   read: { type: Boolean, default: false },
   id: { type: Number, index: true },
-  reactions: { type: Map, of: [String], default: {} },
+  reactions: { type: Map, of: [String], default: {} }, // Список юзеров для каждой реакции
 });
 const Message = mongoose.model("Message", MessageSchema);
 
@@ -60,7 +60,7 @@ let activeUsers = {};
 
 // Оптимизация: берем только базу для списка контактов
 const getUsersListWithStatus = async () => {
-  // Выбираем только то, что нужно для отображения в сайдбаре
+  // Выбираем только то, что нужно для отображения в сайдбаре (username, avatar, status)
   const allUsers = await User.find({}).select("username avatar status");
 
   return allUsers.map((u) => {
@@ -124,7 +124,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Оставляем старый метод для совместимости (если фронт еще не перешел на пошаговый)
+  // Оставляем старый метод для совместимости
   socket.on("get_full_profile", async (username) => {
     try {
       const fullUser = await User.findOne({ username: username });
@@ -164,23 +164,31 @@ io.on("connection", (socket) => {
     }
   });
 
+  // ОБНОВЛЕННЫЕ РЕАКЦИИ
   socket.on("add_reaction", async (data) => {
     try {
       const message = await Message.findOne({ id: data.msgId });
       if (message) {
         const currentReactions = message.reactions || new Map();
-        const users = currentReactions.get(data.reaction) || [];
+        let users = currentReactions.get(data.reaction) || [];
+
+        // Если юзер уже ставил эту реакцию — убираем, если нет — добавляем (Toggle-логика)
         if (users.includes(data.username)) {
-          currentReactions.set(
-            data.reaction,
-            users.filter((u) => u !== data.username),
-          );
+          users = users.filter((u) => u !== data.username);
         } else {
           users.push(data.username);
-          currentReactions.set(data.reaction, users);
         }
+
+        if (users.length > 0) {
+          currentReactions.set(data.reaction, users);
+        } else {
+          currentReactions.delete(data.reaction);
+        }
+
         message.reactions = currentReactions;
         await message.save();
+
+        // Рассылаем обновленный объект реакций всем
         io.emit("reaction_updated", {
           msgId: data.msgId,
           reactions: Object.fromEntries(message.reactions),
@@ -192,9 +200,13 @@ io.on("connection", (socket) => {
   });
 
   socket.on("send_message", async (msgData) => {
-    const newMessage = new Message(msgData);
-    await newMessage.save();
-    io.emit("receive_message", msgData);
+    try {
+      const newMessage = new Message(msgData);
+      await newMessage.save();
+      io.emit("receive_message", msgData);
+    } catch (err) {
+      console.error("Ошибка отправки сообщения:", err);
+    }
   });
 
   socket.on("edit_message", async (data) => {
@@ -216,21 +228,29 @@ io.on("connection", (socket) => {
   });
 
   socket.on("get_history", async (data) => {
-    const history = await Message.find({
-      $or: [
-        { from: data.me, to: data.partner },
-        { from: data.partner, to: data.me },
-      ],
-    }).sort({ _id: 1 });
-    socket.emit("chat_history", history);
+    try {
+      const history = await Message.find({
+        $or: [
+          { from: data.me, to: data.partner },
+          { from: data.partner, to: data.me },
+        ],
+      }).sort({ _id: 1 });
+      socket.emit("chat_history", history);
+    } catch (err) {
+      console.error("Ошибка истории:", err);
+    }
   });
 
   socket.on("mark_as_read", async (data) => {
-    await Message.updateMany(
-      { from: data.chatPartner, to: data.reader, read: false },
-      { $set: { read: true } },
-    );
-    io.emit("messages_marked_read", data);
+    try {
+      await Message.updateMany(
+        { from: data.chatPartner, to: data.reader, read: false },
+        { $set: { read: true } },
+      );
+      io.emit("messages_marked_read", data);
+    } catch (err) {
+      console.error("Ошибка прочтения:", err);
+    }
   });
 
   socket.on("send_sticker", (data) => {
@@ -241,6 +261,7 @@ io.on("connection", (socket) => {
     delete activeUsers[socket.id];
     const listWithStatus = await getUsersListWithStatus();
     io.emit("update_users", listWithStatus);
+    console.log("Юзер отключился:", socket.id);
   });
 });
 
