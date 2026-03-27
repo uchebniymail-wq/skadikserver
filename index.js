@@ -27,7 +27,9 @@ const MessageSchema = new mongoose.Schema({
   type: String,
   time: String,
   read: { type: Boolean, default: false },
-  id: Number,
+  id: { type: Number, index: true },
+  // Добавляем поле для хранения реакций { "😂": ["user1", "user2"], ... }
+  reactions: { type: Map, of: [String], default: {} },
 });
 const Message = mongoose.model("Message", MessageSchema);
 
@@ -60,18 +62,13 @@ app.use(express.static(distPath));
 // 3. ЛОГИКА СОКЕТОВ
 let activeUsers = {};
 
-// Вспомогательная функция для формирования списка юзеров с учетом логики невидимости
 const getUsersListWithStatus = async () => {
   const allUsers = await User.find({});
   return allUsers.map((u) => {
     const isActive = Object.values(activeUsers).some(
       (a) => a.username === u.username.toLowerCase(),
     );
-
-    // ЛОГИКА НЕВИДИМКИ:
-    // Юзер онлайн только если он активен в сокетах И его статус НЕ 'invisible'
     const isActuallyOnline = isActive && u.status !== "invisible";
-
     return {
       ...u._doc,
       isOnline: isActuallyOnline,
@@ -99,7 +96,7 @@ io.on("connection", (socket) => {
     io.emit("update_users", listWithStatus);
   });
 
-  // Обновление профиля (аватар, музыка, био, баннер, статус и т.д.)
+  // Обновление профиля
   socket.on("update_profile", async (updatedData) => {
     try {
       await User.findOneAndUpdate(
@@ -108,7 +105,7 @@ io.on("connection", (socket) => {
           avatar: updatedData.avatar,
           banner: updatedData.banner,
           bio: updatedData.bio,
-          status: updatedData.status, // Сохраняем статус из профиля
+          status: updatedData.status,
           musicFile: updatedData.musicFile,
           musicName: updatedData.musicName,
           steamUrl: updatedData.steamUrl,
@@ -117,40 +114,63 @@ io.on("connection", (socket) => {
         { new: true },
       );
 
-      // Рассылаем всем обновленный список пользователей с учетом инвиза
       const listWithStatus = await getUsersListWithStatus();
       io.emit("update_users", listWithStatus);
-
       io.emit("profile_updated", updatedData);
-      console.log(
-        `Профиль ${updatedData.username} обновлен (статус: ${updatedData.status})`,
-      );
     } catch (err) {
       console.error("Ошибка при обновлении профиля:", err);
     }
   });
 
-  // Смена статуса (вызывается отдельно из настроек)
+  // Смена статуса
   socket.on("change_status", async (data) => {
     try {
-      // data = { username: 'nick', status: 'invisible' }
       await User.findOneAndUpdate(
         { username: data.username },
         { status: data.status },
       );
-
       const listWithStatus = await getUsersListWithStatus();
       io.emit("update_users", listWithStatus);
-
-      console.log(
-        `Статус пользователя ${data.username} изменен на ${data.status}`,
-      );
     } catch (err) {
       console.error("Ошибка при смене статуса:", err);
     }
   });
 
-  // Отправка стикера
+  // РЕАКЦИИ (Новое событие)
+  socket.on("add_reaction", async (data) => {
+    try {
+      // data = { msgId, reaction, username }
+      const message = await Message.findOne({ id: data.msgId });
+      if (message) {
+        const currentReactions = message.reactions || new Map();
+        const users = currentReactions.get(data.reaction) || [];
+
+        // Если юзер уже ставил эту реакцию — убираем, если нет — добавляем (toggle)
+        if (users.includes(data.username)) {
+          currentReactions.set(
+            data.reaction,
+            users.filter((u) => u !== data.username),
+          );
+        } else {
+          users.push(data.username);
+          currentReactions.set(data.reaction, users);
+        }
+
+        message.reactions = currentReactions;
+        await message.save();
+
+        // Рассылаем всем обновленные данные
+        io.emit("reaction_updated", {
+          msgId: data.msgId,
+          reactions: Object.fromEntries(message.reactions),
+        });
+      }
+    } catch (err) {
+      console.error("Ошибка при добавлении реакции:", err);
+    }
+  });
+
+  // Стикеры
   socket.on("send_sticker", (data) => {
     io.emit("receive_message", { ...data, type: "sticker", id: Date.now() });
   });
@@ -182,7 +202,7 @@ io.on("connection", (socket) => {
     io.emit("messages_marked_read", data);
   });
 
-  // Запрос музыки
+  // Музыка
   socket.on("ask_for_music", (targetName) => {
     const target = Object.values(activeUsers).find(
       (u) => u.username === targetName.toLowerCase(),
@@ -190,7 +210,6 @@ io.on("connection", (socket) => {
     if (target) io.to(target.socketId).emit("request_music", socket.id);
   });
 
-  // Передача музыки конкретному юзеру
   socket.on("send_music_to_user", (data) => {
     io.to(data.to).emit("receive_music", data);
   });
@@ -198,19 +217,18 @@ io.on("connection", (socket) => {
   // Отключение
   socket.on("disconnect", async () => {
     delete activeUsers[socket.id];
-    // Оповещаем остальных, что кто-то вышел (или стал оффлайн)
     const listWithStatus = await getUsersListWithStatus();
     io.emit("update_users", listWithStatus);
   });
 });
 
-// 4. ГАРАНТИРОВАННЫЙ ФИКС ДЛЯ EXPRESS 5
+// ФИКС ДЛЯ EXPRESS
 app.use((req, res) => {
   const indexPath = path.join(distPath, "index.html");
   if (fs.existsSync(indexPath)) {
     res.sendFile(indexPath);
   } else {
-    res.status(404).send("Сделайте билд! Файл index.html не найден.");
+    res.status(404).send("Сделайте билд!");
   }
 });
 
