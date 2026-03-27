@@ -164,41 +164,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // ОБНОВЛЕННЫЕ РЕАКЦИИ
-  socket.on("add_reaction", async (data) => {
-    try {
-      const message = await Message.findOne({ id: data.msgId });
-      if (message) {
-        const currentReactions = message.reactions || new Map();
-        let users = currentReactions.get(data.reaction) || [];
-
-        // Если юзер уже ставил эту реакцию — убираем, если нет — добавляем (Toggle-логика)
-        if (users.includes(data.username)) {
-          users = users.filter((u) => u !== data.username);
-        } else {
-          users.push(data.username);
-        }
-
-        if (users.length > 0) {
-          currentReactions.set(data.reaction, users);
-        } else {
-          currentReactions.delete(data.reaction);
-        }
-
-        message.reactions = currentReactions;
-        await message.save();
-
-        // Рассылаем обновленный объект реакций всем
-        io.emit("reaction_updated", {
-          msgId: data.msgId,
-          reactions: Object.fromEntries(message.reactions),
-        });
-      }
-    } catch (err) {
-      console.error("Ошибка реакций:", err);
-    }
-  });
-
   socket.on("send_message", async (msgData) => {
     try {
       const newMessage = new Message(msgData);
