@@ -40,13 +40,12 @@ const UserSchema = new mongoose.Schema({
   musicFile: String,
   musicName: String,
   socketId: String,
-  status: { type: String, default: "online" }, // online, idle, dnd, invisible
+  status: { type: String, default: "online" },
   steamUrl: String,
   customStickers: Array,
 });
 const User = mongoose.model("User", UserSchema);
 
-// Настройки сокетов
 const io = new Server(server, {
   cors: { origin: "*" },
   maxHttpBufferSize: 1e8,
@@ -54,18 +53,15 @@ const io = new Server(server, {
 });
 
 const distPath = path.join(__dirname, "dist");
-
-// 2. ПОДКЛЮЧЕНИЕ СТАТИКИ
 app.use(express.static(distPath));
 
 // 3. ЛОГИКА СОКЕТОВ
 let activeUsers = {};
 
-// ОПТИМИЗИРОВАННАЯ ФУНКЦИЯ: Исключаем тяжелые поля (музыку и баннеры)
+// Оптимизация: берем только базу для списка контактов
 const getUsersListWithStatus = async () => {
-  // .select("-musicFile -banner") — это "черный список" полей.
-  // Они не будут загружаться в оперативную память сервера при каждом обновлении списка.
-  const allUsers = await User.find({}).select("-musicFile -banner");
+  // Выбираем только то, что нужно для отображения в сайдбаре
+  const allUsers = await User.find({}).select("username avatar status");
 
   return allUsers.map((u) => {
     const isActive = Object.values(activeUsers).some(
@@ -83,7 +79,7 @@ const getUsersListWithStatus = async () => {
 io.on("connection", (socket) => {
   console.log("Новое соединение:", socket.id);
 
-  // Вход пользователя
+  // Вход: Минимум данных при старте
   socket.on("user_join", async (userData) => {
     if (!userData || !userData.username) return;
     const usernameLow = userData.username.toLowerCase();
@@ -93,19 +89,42 @@ io.on("connection", (socket) => {
       socketId: socket.id,
     };
 
-    // Сохраняем/обновляем полный профиль (тут сохраняем всё, включая тяжелые поля)
     await User.findOneAndUpdate(
       { username: userData.username },
       { ...userData, socketId: socket.id },
       { upsert: true, new: true },
     );
 
-    // Рассылаем обновленный "легкий" список всем
     const listWithStatus = await getUsersListWithStatus();
     io.emit("update_users", listWithStatus);
   });
 
-  // Запрос полных данных профиля (Вот тут мы выкачиваем всё, когда кликаем по юзеру)
+  // --- ЛЕНИВАЯ ЗАГРУЗКА ДАННЫХ ---
+
+  // 1. Запрос текстовых деталей (био, баннер, ссылка)
+  socket.on("get_profile_details", async (username) => {
+    try {
+      const details = await User.findOne({ username }).select(
+        "banner bio steamUrl musicName",
+      );
+      if (details) socket.emit("receive_profile_details", details);
+    } catch (err) {
+      console.error("Ошибка деталей профиля:", err);
+    }
+  });
+
+  // 2. Запрос тяжелого аудио-файла (только когда нужно играть музыку)
+  socket.on("get_my_music", async (username) => {
+    try {
+      const user = await User.findOne({ username }).select("musicFile");
+      if (user)
+        socket.emit("receive_music_file", { username, file: user.musicFile });
+    } catch (err) {
+      console.error("Ошибка загрузки музыки:", err);
+    }
+  });
+
+  // Оставляем старый метод для совместимости (если фронт еще не перешел на пошаговый)
   socket.on("get_full_profile", async (username) => {
     try {
       const fullUser = await User.findOne({ username: username });
@@ -115,33 +134,23 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Обновление профиля
+  // --- ОСТАЛЬНАЯ ЛОГИКА (РЕАКЦИИ, СООБЩЕНИЯ) ---
+
   socket.on("update_profile", async (updatedData) => {
     try {
       await User.findOneAndUpdate(
         { username: updatedData.username },
-        {
-          avatar: updatedData.avatar,
-          banner: updatedData.banner,
-          bio: updatedData.bio,
-          status: updatedData.status,
-          musicFile: updatedData.musicFile,
-          musicName: updatedData.musicName,
-          steamUrl: updatedData.steamUrl,
-          customStickers: updatedData.customStickers,
-        },
+        { $set: updatedData },
         { new: true },
       );
-
       const listWithStatus = await getUsersListWithStatus();
       io.emit("update_users", listWithStatus);
       io.emit("profile_updated", updatedData);
     } catch (err) {
-      console.error("Ошибка при обновлении профиля:", err);
+      console.error("Ошибка обновления профиля:", err);
     }
   });
 
-  // Смена статуса
   socket.on("change_status", async (data) => {
     try {
       await User.findOneAndUpdate(
@@ -151,18 +160,16 @@ io.on("connection", (socket) => {
       const listWithStatus = await getUsersListWithStatus();
       io.emit("update_users", listWithStatus);
     } catch (err) {
-      console.error("Ошибка при смене статуса:", err);
+      console.error("Ошибка статуса:", err);
     }
   });
 
-  // РЕАКЦИИ
   socket.on("add_reaction", async (data) => {
     try {
       const message = await Message.findOne({ id: data.msgId });
       if (message) {
         const currentReactions = message.reactions || new Map();
         const users = currentReactions.get(data.reaction) || [];
-
         if (users.includes(data.username)) {
           currentReactions.set(
             data.reaction,
@@ -172,10 +179,8 @@ io.on("connection", (socket) => {
           users.push(data.username);
           currentReactions.set(data.reaction, users);
         }
-
         message.reactions = currentReactions;
         await message.save();
-
         io.emit("reaction_updated", {
           msgId: data.msgId,
           reactions: Object.fromEntries(message.reactions),
@@ -186,54 +191,40 @@ io.on("connection", (socket) => {
     }
   });
 
-  // СООБЩЕНИЯ
   socket.on("send_message", async (msgData) => {
     const newMessage = new Message(msgData);
     await newMessage.save();
     io.emit("receive_message", msgData);
   });
 
-  // РЕДАКТИРОВАНИЕ
   socket.on("edit_message", async (data) => {
     try {
       await Message.updateOne({ id: data.id }, { $set: { text: data.text } });
       io.emit("message_edited", data);
     } catch (err) {
-      console.error("Ошибка редактирования:", err);
+      console.error("Ошибка ред.:", err);
     }
   });
 
-  // УДАЛЕНИЕ
   socket.on("delete_message", async (id) => {
     try {
-      console.log("Удаляю сообщение с ID:", id);
       await Message.deleteOne({ id: id });
       io.emit("message_deleted", id);
     } catch (err) {
-      console.error("Ошибка удаления из базы:", err);
+      console.error("Ошибка удаления:", err);
     }
   });
 
-  // ИСТОРИЯ ЧАТА
   socket.on("get_history", async (data) => {
     const history = await Message.find({
       $or: [
         { from: data.me, to: data.partner },
         { from: data.partner, to: data.me },
-        {
-          from: new RegExp(`^${data.me}$`, "i"),
-          to: new RegExp(`^${data.partner}$`, "i"),
-        },
-        {
-          from: new RegExp(`^${data.partner}$`, "i"),
-          to: new RegExp(`^${data.me}$`, "i"),
-        },
       ],
     }).sort({ _id: 1 });
     socket.emit("chat_history", history);
   });
 
-  // Прочитанные сообщения
   socket.on("mark_as_read", async (data) => {
     await Message.updateMany(
       { from: data.chatPartner, to: data.reader, read: false },
@@ -242,23 +233,10 @@ io.on("connection", (socket) => {
     io.emit("messages_marked_read", data);
   });
 
-  // Музыка и стикеры
   socket.on("send_sticker", (data) => {
     io.emit("receive_message", { ...data, type: "sticker", id: Date.now() });
   });
 
-  socket.on("ask_for_music", (targetName) => {
-    const target = Object.values(activeUsers).find(
-      (u) => u.username === targetName.toLowerCase(),
-    );
-    if (target) io.to(target.socketId).emit("request_music", socket.id);
-  });
-
-  socket.on("send_music_to_user", (data) => {
-    io.to(data.to).emit("receive_music", data);
-  });
-
-  // Отключение
   socket.on("disconnect", async () => {
     delete activeUsers[socket.id];
     const listWithStatus = await getUsersListWithStatus();
@@ -266,17 +244,11 @@ io.on("connection", (socket) => {
   });
 });
 
-// ФИКС ДЛЯ EXPRESS (SPA routing)
 app.use((req, res) => {
   const indexPath = path.join(distPath, "index.html");
-  if (fs.existsSync(indexPath)) {
-    res.sendFile(indexPath);
-  } else {
-    res.status(404).send("Сделайте билд (npm run build)!");
-  }
+  if (fs.existsSync(indexPath)) res.sendFile(indexPath);
+  else res.status(404).send("Build not found!");
 });
 
 const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => {
-  console.log(`>>> Skadik запущен на порту ${PORT}`);
-});
+server.listen(PORT, () => console.log(`>>> Skadik на порту ${PORT}`));
