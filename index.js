@@ -34,9 +34,14 @@ const Message = mongoose.model("Message", MessageSchema);
 const UserSchema = new mongoose.Schema({
   username: { type: String, unique: true },
   avatar: String,
+  banner: String,
+  bio: String,
   musicFile: String,
   musicName: String,
   socketId: String,
+  status: { type: String, default: "online" }, // online, idle, dnd, invisible
+  steamUrl: String,
+  customStickers: Array,
 });
 const User = mongoose.model("User", UserSchema);
 
@@ -55,6 +60,26 @@ app.use(express.static(distPath));
 // 3. ЛОГИКА СОКЕТОВ
 let activeUsers = {};
 
+// Вспомогательная функция для формирования списка юзеров с учетом логики невидимости
+const getUsersListWithStatus = async () => {
+  const allUsers = await User.find({});
+  return allUsers.map((u) => {
+    const isActive = Object.values(activeUsers).some(
+      (a) => a.username === u.username.toLowerCase(),
+    );
+
+    // ЛОГИКА НЕВИДИМКИ:
+    // Юзер онлайн только если он активен в сокетах И его статус НЕ 'invisible'
+    const isActuallyOnline = isActive && u.status !== "invisible";
+
+    return {
+      ...u._doc,
+      isOnline: isActuallyOnline,
+      currentStatus: isActuallyOnline ? u.status : "offline",
+    };
+  });
+};
+
 io.on("connection", (socket) => {
   // Вход пользователя
   socket.on("user_join", async (userData) => {
@@ -70,37 +95,64 @@ io.on("connection", (socket) => {
       { upsert: true },
     );
 
-    const allUsers = await User.find({});
-    const listWithStatus = allUsers.map((u) => ({
-      ...u._doc,
-      isOnline: Object.values(activeUsers).some(
-        (a) => a.username === u.username.toLowerCase(),
-      ),
-    }));
+    const listWithStatus = await getUsersListWithStatus();
     io.emit("update_users", listWithStatus);
   });
 
-  // НОВОЕ: Обновление профиля (аватар, музыка)
+  // Обновление профиля (аватар, музыка, био, баннер, статус и т.д.)
   socket.on("update_profile", async (updatedData) => {
     try {
-      // 1. Обновляем в базе данных MongoDB
       await User.findOneAndUpdate(
         { username: updatedData.username },
         {
           avatar: updatedData.avatar,
+          banner: updatedData.banner,
+          bio: updatedData.bio,
+          status: updatedData.status, // Сохраняем статус из профиля
           musicFile: updatedData.musicFile,
           musicName: updatedData.musicName,
+          steamUrl: updatedData.steamUrl,
+          customStickers: updatedData.customStickers,
         },
         { new: true },
       );
 
-      // 2. Рассылаем всем сигнал: "Этот пользователь обновился!"
-      io.emit("profile_updated", updatedData);
+      // Рассылаем всем обновленный список пользователей с учетом инвиза
+      const listWithStatus = await getUsersListWithStatus();
+      io.emit("update_users", listWithStatus);
 
-      console.log(`Профиль ${updatedData.username} обновлен и разослан всем`);
+      io.emit("profile_updated", updatedData);
+      console.log(
+        `Профиль ${updatedData.username} обновлен (статус: ${updatedData.status})`,
+      );
     } catch (err) {
       console.error("Ошибка при обновлении профиля:", err);
     }
+  });
+
+  // Смена статуса (вызывается отдельно из настроек)
+  socket.on("change_status", async (data) => {
+    try {
+      // data = { username: 'nick', status: 'invisible' }
+      await User.findOneAndUpdate(
+        { username: data.username },
+        { status: data.status },
+      );
+
+      const listWithStatus = await getUsersListWithStatus();
+      io.emit("update_users", listWithStatus);
+
+      console.log(
+        `Статус пользователя ${data.username} изменен на ${data.status}`,
+      );
+    } catch (err) {
+      console.error("Ошибка при смене статуса:", err);
+    }
+  });
+
+  // Отправка стикера
+  socket.on("send_sticker", (data) => {
+    io.emit("receive_message", { ...data, type: "sticker", id: Date.now() });
   });
 
   // Сообщения
@@ -144,8 +196,11 @@ io.on("connection", (socket) => {
   });
 
   // Отключение
-  socket.on("disconnect", () => {
+  socket.on("disconnect", async () => {
     delete activeUsers[socket.id];
+    // Оповещаем остальных, что кто-то вышел (или стал оффлайн)
+    const listWithStatus = await getUsersListWithStatus();
+    io.emit("update_users", listWithStatus);
   });
 });
 
