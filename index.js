@@ -61,9 +61,12 @@ app.use(express.static(distPath));
 // 3. ЛОГИКА СОКЕТОВ
 let activeUsers = {};
 
-// ОПТИМИЗИРОВАННАЯ ФУНКЦИЯ: берем только легкие поля для общего списка
+// ОПТИМИЗИРОВАННАЯ ФУНКЦИЯ: Исключаем тяжелые поля (музыку и баннеры)
 const getUsersListWithStatus = async () => {
-  const allUsers = await User.find({}, "username avatar status steamUrl bio");
+  // .select("-musicFile -banner") — это "черный список" полей.
+  // Они не будут загружаться в оперативную память сервера при каждом обновлении списка.
+  const allUsers = await User.find({}).select("-musicFile -banner");
+
   return allUsers.map((u) => {
     const isActive = Object.values(activeUsers).some(
       (a) => a.username === u.username.toLowerCase(),
@@ -90,18 +93,19 @@ io.on("connection", (socket) => {
       socketId: socket.id,
     };
 
-    // Сохраняем/обновляем полный профиль
+    // Сохраняем/обновляем полный профиль (тут сохраняем всё, включая тяжелые поля)
     await User.findOneAndUpdate(
       { username: userData.username },
       { ...userData, socketId: socket.id },
       { upsert: true, new: true },
     );
 
+    // Рассылаем обновленный "легкий" список всем
     const listWithStatus = await getUsersListWithStatus();
     io.emit("update_users", listWithStatus);
   });
 
-  // Запрос полных данных профиля
+  // Запрос полных данных профиля (Вот тут мы выкачиваем всё, когда кликаем по юзеру)
   socket.on("get_full_profile", async (username) => {
     try {
       const fullUser = await User.findOne({ username: username });
@@ -199,7 +203,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  // УДАЛЕНИЕ (с логами для отладки)
+  // УДАЛЕНИЕ
   socket.on("delete_message", async (id) => {
     try {
       console.log("Удаляю сообщение с ID:", id);
@@ -210,13 +214,12 @@ io.on("connection", (socket) => {
     }
   });
 
-  // ИСТОРИЯ ЧАТА (с фиксом регистра)
+  // ИСТОРИЯ ЧАТА
   socket.on("get_history", async (data) => {
     const history = await Message.find({
       $or: [
         { from: data.me, to: data.partner },
         { from: data.partner, to: data.me },
-        // Доп. проверка для разного регистра
         {
           from: new RegExp(`^${data.me}$`, "i"),
           to: new RegExp(`^${data.partner}$`, "i"),
