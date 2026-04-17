@@ -43,6 +43,8 @@ const UserSchema = new mongoose.Schema({
   status: { type: String, default: "online" },
   steamUrl: String,
   customStickers: Array,
+  // Поле для баллов взаимодействия
+  interactions: { type: Map, of: Number, default: {} },
 });
 const User = mongoose.model("User", UserSchema);
 
@@ -61,19 +63,14 @@ let activeSockets = {}; // { socketId: username }
 io.on("connection", (socket) => {
   console.log("Подключился:", socket.id);
 
-  // Функция рассылки списка (теперь внутри io.on для доступа к io)
   const broadcastOnlineList = async () => {
-    // Выбираем данные для сайдбара, исключая тяжелые поля
     const allUsers = await User.find({}).select("-musicFile -banner");
-
-    // Получаем список имен, которые СЕЙЧАС подключены
     const namesOnline = Object.values(activeSockets);
 
     const updatedList = allUsers.map((u) => {
       const isActuallyOnline = namesOnline.includes(u.username.toLowerCase());
       return {
         ...u._doc,
-        // Человек онлайн, только если его имя в активных сокетах и статус не invisible
         isOnline: isActuallyOnline && u.status !== "invisible",
         currentStatus:
           isActuallyOnline && u.status !== "invisible" ? u.status : "offline",
@@ -87,9 +84,8 @@ io.on("connection", (socket) => {
     if (!userData || !userData.username) return;
 
     const name = userData.username.toLowerCase();
-    activeSockets[socket.id] = name; // Привязываем имя к текущему соединению
+    activeSockets[socket.id] = name;
 
-    // Обновляем инфо в базе
     await User.findOneAndUpdate(
       { username: userData.username },
       { ...userData, socketId: socket.id },
@@ -159,8 +155,26 @@ io.on("connection", (socket) => {
 
   socket.on("send_message", async (msgData) => {
     try {
+      // 1. Сохраняем сообщение
       const newMessage = new Message(msgData);
       await newMessage.save();
+
+      // 2. Начисляем +1 балл отправителю (логика из первого кода)
+      const user = await User.findOne({ username: msgData.from });
+      if (user) {
+        if (!user.interactions) user.interactions = new Map(); // на случай если Map не создался
+        const currentScore = user.interactions.get(msgData.to) || 0;
+        user.interactions.set(msgData.to, currentScore + 1);
+        await user.save();
+
+        // Отправляем обновленный счетчик отправителю
+        socket.emit("score_updated", {
+          partner: msgData.to,
+          score: currentScore + 1,
+        });
+      }
+
+      // 3. Рассылаем сообщение всем
       io.emit("receive_message", msgData);
     } catch (err) {
       console.error("Ошибка отправки сообщения:", err);
